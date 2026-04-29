@@ -1,0 +1,30 @@
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+
+# Local virtual environments
+.venv/
+venv/
+Include/
+Lib/
+Scripts/
+pyvenv.cfg
+
+# PyInstaller generated artifacts
+app/build*/
+app/dist*/
+app/SNMP_Verifier_Release/
+*.spec.bak
+
+# Local logs and generated reports
+*.log
+*_SNMP_RESULTS_*.xlsx
+*_DEBUG.log
+
+# Operating system and editor files
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
