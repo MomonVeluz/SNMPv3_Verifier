@@ -46,6 +46,8 @@ From the repository root:
 
 ```powershell
 New-Item -ItemType Directory -Force -Path release | Out-Null
+Copy-Item -LiteralPath docs\README_RUN_THIS.txt -Destination app\dist\SNMP_Verifier\README_RUN_THIS.txt -Force
+Copy-Item -LiteralPath docs\USER_GUIDE.md -Destination app\dist\SNMP_Verifier\USER_GUIDE.md -Force
 Compress-Archive -Path app\dist\SNMP_Verifier\* -DestinationPath release\SNMP_Verifier_Windows.zip -Force
 ```
 

@@ -17,6 +17,7 @@ from pysnmp.hlapi import (
     ObjectType,
     ObjectIdentity,
     getCmd,
+    nextCmd,
     UsmUserData,
     usmHMACSHAAuthProtocol,            # SHA-1
     usmHMAC192SHA256AuthProtocol,      # SHA-256 family (truncated) per RFC 7860
@@ -62,6 +63,8 @@ ACCENT_DARK = "#B5121B"
 DANGER = "#4D4D4D"
 DANGER_DARK = "#333333"
 BORDER = "#D6D6D6"
+CREDENTIAL_VIEWPORT_EXPANDED = 190
+CREDENTIAL_VIEWPORT_SCROLL = 184
 
 
 @dataclass(frozen=True)
@@ -78,6 +81,14 @@ class RunConfig:
     file_path: str
     credentials: tuple[CredentialConfig, ...]
     write_debug_log: bool
+
+
+@dataclass(frozen=True)
+class WalkConfig:
+    ip: str
+    root_oid: str
+    max_rows: int
+    credential: CredentialConfig
 
 def resource_path(relative_path):
     """ Get absolute path to resource, works for dev and PyInstaller """
@@ -110,6 +121,17 @@ def is_probably_ip(value: str) -> bool:
         return all(0 <= int(p) <= 255 for p in parts)
     except ValueError:
         return False
+
+
+def normalize_numeric_oid(value: str) -> str:
+    if not isinstance(value, str):
+        raise ValueError("Root OID is required.")
+
+    oid = value.strip().lstrip(".")
+    if not oid or not re.match(r"^\d+(\.\d+)*$", oid):
+        raise ValueError("Root OID must be numeric, for example 1.3.6.1.2.1.1.")
+
+    return oid
 
 
 def find_ip_address_column(df: pd.DataFrame) -> str:
@@ -207,8 +229,8 @@ class App(tk.Tk):
     def __init__(self):
         super().__init__()
         self.title(APP_TITLE)
-        self.geometry("880x570")
-        self.minsize(840, 570)
+        self.geometry("900x660")
+        self.minsize(860, 660)
         self.configure(bg=WINDOW_BG)
         self.option_add("*Font", ("Segoe UI", 10))
         try:
@@ -239,6 +261,19 @@ class App(tk.Tk):
         self.status_var = tk.StringVar(value="Select an Excel file to begin.")
         self.progress_var = tk.StringVar(value="")
         self.progress_percent_var = tk.DoubleVar(value=0)
+
+        self.walk_ip_var = tk.StringVar(value="")
+        self.walk_oid_var = tk.StringVar(value="1.3.6.1.2.1.1")
+        self.walk_max_rows_var = tk.IntVar(value=500)
+        self.walk_username_var = tk.StringVar(value="")
+        self.walk_auth_var = tk.StringVar(value="")
+        self.walk_priv_var = tk.StringVar(value="")
+        self.walk_auth_proto_var = tk.StringVar(value="SHA")
+        self.walk_priv_proto_var = tk.StringVar(value="AES-128")
+        self.walk_status_var = tk.StringVar(value="Enter device and SNMPv3 credentials.")
+        self.walk_progress_var = tk.StringVar(value="")
+        self.walk_stop_requested = threading.Event()
+        self.walk_results: list[dict[str, str]] = []
 
         self._build_ui()
 
@@ -299,6 +334,38 @@ class App(tk.Tk):
             lightcolor=ACCENT,
             darkcolor=ACCENT,
         )
+        style.configure(
+            "Corporate.TNotebook",
+            background=WINDOW_BG,
+            borderwidth=0,
+        )
+        style.configure(
+            "Corporate.TNotebook.Tab",
+            background="#EDEDED",
+            foreground=TEXT_PRIMARY,
+            font=("Segoe UI", 9, "bold"),
+            padding=(14, 6),
+        )
+        style.map(
+            "Corporate.TNotebook.Tab",
+            background=[("selected", PANEL_BG), ("active", "#F5F5F5")],
+            foreground=[("selected", ACCENT_DARK), ("active", TEXT_PRIMARY)],
+        )
+        style.configure(
+            "Corporate.Treeview",
+            background=PANEL_BG,
+            fieldbackground=PANEL_BG,
+            foreground=TEXT_PRIMARY,
+            rowheight=23,
+            borderwidth=0,
+        )
+        style.configure(
+            "Corporate.Treeview.Heading",
+            background="#ECECEC",
+            foreground=TEXT_PRIMARY,
+            font=("Segoe UI", 9, "bold"),
+            relief="flat",
+        )
 
         section_font = ("Segoe UI", 10, "bold")
         label_font = ("Segoe UI", 9)
@@ -307,6 +374,7 @@ class App(tk.Tk):
         outer = tk.Frame(self, bg=WINDOW_BG)
         outer.pack(fill="both", expand=True, padx=12, pady=12)
         outer.grid_columnconfigure(0, weight=1)
+        outer.grid_rowconfigure(1, weight=1)
 
         header = tk.Frame(
             outer,
@@ -340,8 +408,16 @@ class App(tk.Tk):
             font=("Segoe UI", 9),
         ).grid(row=1, column=0, sticky="w", pady=(1, 0))
 
-        content = tk.Frame(outer, bg=WINDOW_BG)
-        content.grid(row=1, column=0, sticky="nsew")
+        notebook = ttk.Notebook(outer, style="Corporate.TNotebook")
+        notebook.grid(row=1, column=0, sticky="nsew")
+
+        verify_tab = tk.Frame(notebook, bg=WINDOW_BG)
+        walk_tab = tk.Frame(notebook, bg=WINDOW_BG)
+        notebook.add(verify_tab, text="Workbook Verification")
+        notebook.add(walk_tab, text="SNMP Walk")
+
+        content = tk.Frame(verify_tab, bg=WINDOW_BG)
+        content.pack(fill="both", expand=True, padx=0, pady=6)
         content.grid_columnconfigure(0, weight=1)
 
         def make_panel(row: int, pady: tuple[int, int] = (0, 8)) -> tk.Frame:
@@ -352,8 +428,8 @@ class App(tk.Tk):
                 highlightcolor=BORDER,
                 highlightthickness=1,
                 bd=0,
-                padx=12,
-                pady=10,
+                padx=10,
+                pady=8,
             )
             panel.grid(row=row, column=0, sticky="ew", pady=pady)
             panel.grid_columnconfigure(0, weight=1)
@@ -428,18 +504,18 @@ class App(tk.Tk):
         self.credentials_canvas = tk.Canvas(
             credential_area,
             bg=PANEL_BG,
-            height=160,
+            height=CREDENTIAL_VIEWPORT_EXPANDED,
             highlightthickness=0,
             bd=0,
         )
-        credential_scrollbar = ttk.Scrollbar(
+        self.credential_scrollbar = ttk.Scrollbar(
             credential_area,
             orient="vertical",
             command=self.credentials_canvas.yview,
         )
-        self.credentials_canvas.configure(yscrollcommand=credential_scrollbar.set)
+        self.credentials_canvas.configure(yscrollcommand=self.credential_scrollbar.set)
         self.credentials_canvas.grid(row=0, column=0, sticky="ew")
-        credential_scrollbar.grid(row=0, column=1, sticky="ns", padx=(6, 0))
+        self.credential_scrollbar.grid(row=0, column=1, sticky="ns", padx=(6, 0))
 
         self.credentials_inner = tk.Frame(self.credentials_canvas, bg=PANEL_BG)
         self.credentials_window = self.credentials_canvas.create_window(
@@ -530,6 +606,250 @@ class App(tk.Tk):
             anchor="w",
         ).grid(row=3, column=0, columnspan=2, sticky="ew")
 
+        self._build_walk_tab(walk_tab, section_font, label_font)
+
+    def _build_walk_tab(
+        self,
+        parent: tk.Widget,
+        section_font: tuple[str, int, str],
+        label_font: tuple[str, int],
+    ):
+        content = tk.Frame(parent, bg=WINDOW_BG)
+        content.pack(fill="both", expand=True, padx=0, pady=8)
+        content.grid_columnconfigure(0, weight=1)
+        content.grid_columnconfigure(1, weight=1)
+        content.grid_rowconfigure(2, weight=1)
+
+        def make_panel(
+            row: int,
+            column: int = 0,
+            columnspan: int = 1,
+            sticky: str = "ew",
+            padx: tuple[int, int] = (0, 0),
+            pady: tuple[int, int] = (0, 8),
+        ) -> tk.Frame:
+            panel = tk.Frame(
+                content,
+                bg=PANEL_BG,
+                highlightbackground=BORDER,
+                highlightcolor=BORDER,
+                highlightthickness=1,
+                bd=0,
+                padx=12,
+                pady=10,
+            )
+            panel.grid(
+                row=row,
+                column=column,
+                columnspan=columnspan,
+                sticky=sticky,
+                padx=padx,
+                pady=pady,
+            )
+            panel.grid_columnconfigure(1, weight=1)
+            return panel
+
+        target_panel = make_panel(0, 0, padx=(0, 6))
+        tk.Label(
+            target_panel,
+            text="Walk target",
+            bg=PANEL_BG,
+            fg=TEXT_PRIMARY,
+            font=section_font,
+        ).grid(row=0, column=0, columnspan=2, sticky="w", pady=(0, 8))
+        tk.Label(
+            target_panel,
+            text="Device IP",
+            bg=PANEL_BG,
+            fg=TEXT_SECONDARY,
+            font=label_font,
+        ).grid(row=1, column=0, sticky="w", padx=(0, 10), pady=(0, 6))
+        ttk.Entry(target_panel, textvariable=self.walk_ip_var).grid(
+            row=1, column=1, sticky="ew", ipady=1, pady=(0, 6)
+        )
+        tk.Label(
+            target_panel,
+            text="Root OID",
+            bg=PANEL_BG,
+            fg=TEXT_SECONDARY,
+            font=label_font,
+        ).grid(row=2, column=0, sticky="w", padx=(0, 10), pady=(0, 6))
+        ttk.Combobox(
+            target_panel,
+            textvariable=self.walk_oid_var,
+            values=(
+                "1.3.6.1.2.1.1",
+                "1.3.6.1.2.1.2.2",
+                "1.3.6.1.2.1.25",
+                "1.3.6.1.2.1",
+            ),
+        ).grid(row=2, column=1, sticky="ew", pady=(0, 6))
+        tk.Label(
+            target_panel,
+            text="Max rows",
+            bg=PANEL_BG,
+            fg=TEXT_SECONDARY,
+            font=label_font,
+        ).grid(row=3, column=0, sticky="w", padx=(0, 10))
+        ttk.Combobox(
+            target_panel,
+            textvariable=self.walk_max_rows_var,
+            values=(100, 250, 500, 1000, 2500),
+            state="readonly",
+            width=10,
+        ).grid(row=3, column=1, sticky="w")
+
+        credential_panel = make_panel(0, 1, padx=(6, 0))
+        tk.Label(
+            credential_panel,
+            text="SNMPv3 credentials",
+            bg=PANEL_BG,
+            fg=TEXT_PRIMARY,
+            font=section_font,
+        ).grid(row=0, column=0, columnspan=2, sticky="w", pady=(0, 8))
+        tk.Label(
+            credential_panel,
+            text="Username",
+            bg=PANEL_BG,
+            fg=TEXT_SECONDARY,
+            font=label_font,
+        ).grid(row=1, column=0, sticky="w", padx=(0, 10), pady=(0, 6))
+        ttk.Entry(credential_panel, textvariable=self.walk_username_var).grid(
+            row=1, column=1, sticky="ew", ipady=1, pady=(0, 6)
+        )
+        tk.Label(
+            credential_panel,
+            text="AUTH protocol",
+            bg=PANEL_BG,
+            fg=TEXT_SECONDARY,
+            font=label_font,
+        ).grid(row=2, column=0, sticky="w", padx=(0, 10), pady=(0, 6))
+        ttk.Combobox(
+            credential_panel,
+            textvariable=self.walk_auth_proto_var,
+            values=list(AUTH_PROTOCOLS.keys()),
+            state="readonly",
+            width=12,
+        ).grid(row=2, column=1, sticky="ew", pady=(0, 6))
+        tk.Label(
+            credential_panel,
+            text="PRIV protocol",
+            bg=PANEL_BG,
+            fg=TEXT_SECONDARY,
+            font=label_font,
+        ).grid(row=3, column=0, sticky="w", padx=(0, 10), pady=(0, 6))
+        ttk.Combobox(
+            credential_panel,
+            textvariable=self.walk_priv_proto_var,
+            values=list(PRIV_PROTOCOLS.keys()),
+            state="readonly",
+            width=12,
+        ).grid(row=3, column=1, sticky="ew", pady=(0, 6))
+        tk.Label(
+            credential_panel,
+            text="AUTH password",
+            bg=PANEL_BG,
+            fg=TEXT_SECONDARY,
+            font=label_font,
+        ).grid(row=4, column=0, sticky="w", padx=(0, 10), pady=(0, 6))
+        ttk.Entry(credential_panel, textvariable=self.walk_auth_var, show="*").grid(
+            row=4, column=1, sticky="ew", ipady=1, pady=(0, 6)
+        )
+        tk.Label(
+            credential_panel,
+            text="PRIV password",
+            bg=PANEL_BG,
+            fg=TEXT_SECONDARY,
+            font=label_font,
+        ).grid(row=5, column=0, sticky="w", padx=(0, 10))
+        ttk.Entry(credential_panel, textvariable=self.walk_priv_var, show="*").grid(
+            row=5, column=1, sticky="ew", ipady=1
+        )
+
+        controls_panel = make_panel(1, 0, columnspan=2)
+        controls_panel.grid_columnconfigure(0, weight=1)
+        tk.Label(
+            controls_panel,
+            textvariable=self.walk_status_var,
+            bg=PANEL_BG,
+            fg=TEXT_PRIMARY,
+            font=("Segoe UI", 10, "bold"),
+        ).grid(row=0, column=0, sticky="w")
+        tk.Label(
+            controls_panel,
+            textvariable=self.walk_progress_var,
+            bg=PANEL_BG,
+            fg=TEXT_SECONDARY,
+            font=("Segoe UI", 9),
+        ).grid(row=1, column=0, sticky="w", pady=(4, 0))
+
+        walk_btn_row = tk.Frame(controls_panel, bg=PANEL_BG)
+        walk_btn_row.grid(row=0, column=1, rowspan=2, sticky="e")
+        self.walk_run_btn = ttk.Button(
+            walk_btn_row,
+            text="Start Walk",
+            command=self.run_walk_in_thread,
+            style="Primary.TButton",
+            width=12,
+            takefocus=False,
+        )
+        self.walk_run_btn.pack(side="left", padx=(0, 6))
+        self.walk_stop_btn = ttk.Button(
+            walk_btn_row,
+            text="Stop",
+            command=self.request_walk_stop,
+            style="Danger.TButton",
+            width=9,
+            takefocus=False,
+        )
+        self.walk_stop_btn.pack_forget()
+        self.walk_export_btn = ttk.Button(
+            walk_btn_row,
+            text="Export",
+            command=self.export_walk_results,
+            style="Secondary.TButton",
+            width=10,
+            takefocus=False,
+        )
+        self.walk_export_btn.pack(side="left")
+        self.walk_export_btn.state(["disabled"])
+
+        results_panel = make_panel(2, 0, columnspan=2, sticky="nsew", pady=(0, 0))
+        results_panel.grid_rowconfigure(1, weight=1)
+        tk.Label(
+            results_panel,
+            text="Walk results",
+            bg=PANEL_BG,
+            fg=TEXT_PRIMARY,
+            font=section_font,
+        ).grid(row=0, column=0, sticky="w", pady=(0, 8))
+
+        result_frame = tk.Frame(results_panel, bg=PANEL_BG)
+        result_frame.grid(row=1, column=0, columnspan=2, sticky="nsew")
+        result_frame.grid_columnconfigure(0, weight=1)
+        result_frame.grid_rowconfigure(0, weight=1)
+
+        self.walk_tree = ttk.Treeview(
+            result_frame,
+            columns=("oid", "type", "value"),
+            show="headings",
+            height=4,
+            style="Corporate.Treeview",
+        )
+        self.walk_tree.heading("oid", text="OID")
+        self.walk_tree.heading("type", text="Type")
+        self.walk_tree.heading("value", text="Value")
+        self.walk_tree.column("oid", width=250, minwidth=180, anchor="w")
+        self.walk_tree.column("type", width=120, minwidth=90, anchor="w")
+        self.walk_tree.column("value", width=440, minwidth=220, anchor="w")
+
+        y_scroll = ttk.Scrollbar(result_frame, orient="vertical", command=self.walk_tree.yview)
+        x_scroll = ttk.Scrollbar(result_frame, orient="horizontal", command=self.walk_tree.xview)
+        self.walk_tree.configure(yscrollcommand=y_scroll.set, xscrollcommand=x_scroll.set)
+        self.walk_tree.grid(row=0, column=0, sticky="nsew")
+        y_scroll.grid(row=0, column=1, sticky="ns")
+        x_scroll.grid(row=1, column=0, sticky="ew")
+
     def _build_credential_section(
         self,
         parent: tk.Widget,
@@ -544,8 +864,8 @@ class App(tk.Tk):
             highlightcolor=BORDER,
             highlightthickness=1,
             bd=0,
-            padx=10,
-            pady=8,
+            padx=12,
+            pady=10,
         )
         section.grid_columnconfigure(1, weight=1)
 
@@ -563,9 +883,9 @@ class App(tk.Tk):
             bg=PANEL_ALT_BG,
             fg=TEXT_SECONDARY,
             font=label_font,
-        ).grid(row=1, column=0, sticky="w", pady=(0, 5), padx=(0, 10))
+        ).grid(row=1, column=0, sticky="w", pady=(0, 6), padx=(0, 12))
         ttk.Entry(section, textvariable=credential_vars["username"]).grid(
-            row=1, column=1, sticky="ew", pady=(0, 5), ipady=1
+            row=1, column=1, sticky="ew", pady=(0, 6), ipady=2
         )
 
         tk.Label(
@@ -574,14 +894,14 @@ class App(tk.Tk):
             bg=PANEL_ALT_BG,
             fg=TEXT_SECONDARY,
             font=label_font,
-        ).grid(row=2, column=0, sticky="w", pady=(0, 5), padx=(0, 10))
+        ).grid(row=2, column=0, sticky="w", pady=(0, 6), padx=(0, 12))
         ttk.Combobox(
             section,
             textvariable=credential_vars["auth_proto"],
             values=list(AUTH_PROTOCOLS.keys()),
             state="readonly",
             width=12,
-        ).grid(row=2, column=1, sticky="ew", pady=(0, 5))
+        ).grid(row=2, column=1, sticky="ew", pady=(0, 6))
 
         tk.Label(
             section,
@@ -589,14 +909,14 @@ class App(tk.Tk):
             bg=PANEL_ALT_BG,
             fg=TEXT_SECONDARY,
             font=label_font,
-        ).grid(row=3, column=0, sticky="w", pady=(0, 5), padx=(0, 10))
+        ).grid(row=3, column=0, sticky="w", pady=(0, 6), padx=(0, 12))
         ttk.Combobox(
             section,
             textvariable=credential_vars["priv_proto"],
             values=list(PRIV_PROTOCOLS.keys()),
             state="readonly",
             width=12,
-        ).grid(row=3, column=1, sticky="ew", pady=(0, 5))
+        ).grid(row=3, column=1, sticky="ew", pady=(0, 6))
 
         tk.Label(
             section,
@@ -604,9 +924,9 @@ class App(tk.Tk):
             bg=PANEL_ALT_BG,
             fg=TEXT_SECONDARY,
             font=label_font,
-        ).grid(row=4, column=0, sticky="w", pady=(0, 5), padx=(0, 10))
+        ).grid(row=4, column=0, sticky="w", pady=(0, 6), padx=(0, 12))
         ttk.Entry(section, textvariable=credential_vars["auth"], show="*").grid(
-            row=4, column=1, sticky="ew", pady=(0, 5), ipady=1
+            row=4, column=1, sticky="ew", pady=(0, 6), ipady=2
         )
 
         tk.Label(
@@ -615,9 +935,9 @@ class App(tk.Tk):
             bg=PANEL_ALT_BG,
             fg=TEXT_SECONDARY,
             font=label_font,
-        ).grid(row=5, column=0, sticky="w", padx=(0, 10))
+        ).grid(row=5, column=0, sticky="w", padx=(0, 12))
         ttk.Entry(section, textvariable=credential_vars["priv"], show="*").grid(
-            row=5, column=1, sticky="ew", ipady=1
+            row=5, column=1, sticky="ew", ipady=2
         )
 
         return section
@@ -638,17 +958,32 @@ class App(tk.Tk):
         for idx, section in enumerate(self.credential_sections):
             section.grid_forget()
             if idx < visible_count:
-                row = idx // 2
-                column = idx % 2
-                section.grid(
-                    row=row,
-                    column=column,
-                    sticky="nsew",
-                    padx=(0, 8) if column == 0 else (8, 0),
-                    pady=(0, 8),
-                )
+                if visible_count == 1:
+                    section.grid(row=0, column=0, columnspan=2, sticky="ew", padx=0, pady=(0, 2))
+                else:
+                    row = idx // 2
+                    column = idx % 2
+                    section.grid(
+                        row=row,
+                        column=column,
+                        sticky="nsew",
+                        padx=(0, 8) if column == 0 else (8, 0),
+                        pady=(0, 8),
+                    )
 
         if hasattr(self, "credentials_canvas"):
+            requires_scroll = visible_count > 2
+            self.credentials_inner.update_idletasks()
+            bbox = self.credentials_canvas.bbox("all")
+            content_height = 0 if bbox is None else bbox[3] - bbox[1]
+            expanded_height = max(CREDENTIAL_VIEWPORT_EXPANDED, content_height + 2)
+            viewport_height = CREDENTIAL_VIEWPORT_SCROLL if requires_scroll else expanded_height
+
+            self.credentials_canvas.configure(height=viewport_height)
+            if requires_scroll:
+                self.credential_scrollbar.grid()
+            else:
+                self.credential_scrollbar.grid_remove()
             self.credentials_canvas.yview_moveto(0)
             self.credentials_canvas.configure(scrollregion=self.credentials_canvas.bbox("all"))
 
@@ -737,6 +1072,233 @@ class App(tk.Tk):
     def request_stop(self):
         self.stop_requested.set()
         self.status_var.set("Stop requested... generating partial report.")
+
+    def _toggle_walk_buttons_running(self, running: bool):
+        def _update():
+            if running:
+                self.walk_run_btn.state(["disabled"])
+                self.walk_export_btn.state(["disabled"])
+                self.walk_stop_btn.pack(
+                    side="left",
+                    padx=(0, 6),
+                    before=self.walk_export_btn,
+                )
+            else:
+                self.walk_run_btn.state(["!disabled"])
+                self.walk_stop_btn.pack_forget()
+                if self.walk_results:
+                    self.walk_export_btn.state(["!disabled"])
+                else:
+                    self.walk_export_btn.state(["disabled"])
+        self.after(0, _update)
+
+    def _clear_walk_results(self):
+        self.walk_results = []
+        for item_id in self.walk_tree.get_children():
+            self.walk_tree.delete(item_id)
+        self.walk_export_btn.state(["disabled"])
+
+    def run_walk_in_thread(self):
+        ip = self.walk_ip_var.get().strip()
+        username = self.walk_username_var.get().strip()
+        auth_password = self.walk_auth_var.get().strip()
+        priv_password = self.walk_priv_var.get().strip()
+        auth_proto = self.walk_auth_proto_var.get().strip()
+        priv_proto = self.walk_priv_proto_var.get().strip()
+
+        if not is_probably_ip(ip):
+            messagebox.showerror("Invalid device IP", "Please enter a valid IPv4 address.")
+            return
+
+        try:
+            root_oid = normalize_numeric_oid(self.walk_oid_var.get())
+        except ValueError as exc:
+            messagebox.showerror("Invalid root OID", str(exc))
+            return
+
+        try:
+            max_rows = int(self.walk_max_rows_var.get())
+        except (TypeError, ValueError, tk.TclError):
+            messagebox.showerror("Invalid max rows", "Please select a valid maximum row count.")
+            return
+
+        if max_rows < 1:
+            messagebox.showerror("Invalid max rows", "Maximum rows must be greater than zero.")
+            return
+
+        if not username:
+            messagebox.showerror("Missing username", "Please enter the SNMPv3 username.")
+            return
+        if not auth_password or not priv_password:
+            messagebox.showerror("Missing credentials", "Please enter AUTH and PRIV passwords.")
+            return
+
+        credential = CredentialConfig(
+            username=username,
+            auth_password=auth_password,
+            priv_password=priv_password,
+            auth_proto=auth_proto,
+            priv_proto=priv_proto,
+        )
+        config = WalkConfig(
+            ip=ip,
+            root_oid=root_oid,
+            max_rows=max_rows,
+            credential=credential,
+        )
+
+        self.walk_oid_var.set(root_oid)
+        self.walk_stop_requested.clear()
+        self._clear_walk_results()
+        self._toggle_walk_buttons_running(True)
+        self.walk_status_var.set("Running SNMP walk...")
+        self.walk_progress_var.set(f"Device: {ip}  |  Root OID: {root_oid}")
+        threading.Thread(target=self.process_walk, args=(config,), daemon=True).start()
+
+    def request_walk_stop(self):
+        self.walk_stop_requested.set()
+        self.walk_status_var.set("Stop requested...")
+
+    def process_walk(self, config: WalkConfig):
+        try:
+            auth_proto = AUTH_PROTOCOLS.get(config.credential.auth_proto, usmHMACSHAAuthProtocol)
+            priv_proto = PRIV_PROTOCOLS.get(config.credential.priv_proto, usmAesCfb128Protocol)
+            user_data = UsmUserData(
+                userName=config.credential.username,
+                authKey=config.credential.auth_password,
+                privKey=config.credential.priv_password,
+                authProtocol=auth_proto,
+                privProtocol=priv_proto,
+            )
+            target = UdpTransportTarget(
+                (config.ip, SNMP_PORT),
+                timeout=SNMP_TIMEOUT_SECONDS,
+                retries=SNMP_RETRIES,
+            )
+
+            count = 0
+            iterator = nextCmd(
+                SnmpEngine(),
+                user_data,
+                target,
+                ContextData(),
+                ObjectType(ObjectIdentity(config.root_oid)),
+                lexicographicMode=False,
+            )
+
+            for error_indication, error_status, error_index, var_binds in iterator:
+                if self.walk_stop_requested.is_set():
+                    self._ui_walk_stopped(count)
+                    return
+
+                if error_indication:
+                    self._ui_walk_error(str(error_indication))
+                    return
+
+                if error_status:
+                    failing_oid = "unknown"
+                    if error_index and int(error_index) <= len(var_binds):
+                        failing_oid = var_binds[int(error_index) - 1][0].prettyPrint()
+                    self._ui_walk_error(f"{error_status.prettyPrint()} at {failing_oid}")
+                    return
+
+                for oid, value in var_binds:
+                    if self.walk_stop_requested.is_set():
+                        self._ui_walk_stopped(count)
+                        return
+
+                    count += 1
+                    result = {
+                        "Device IP": config.ip,
+                        "Root OID": config.root_oid,
+                        "OID": oid.prettyPrint(),
+                        "Type": value.__class__.__name__,
+                        "Value": value.prettyPrint(),
+                    }
+                    self.walk_results.append(result)
+                    self._ui_walk_result(result, count)
+
+                    if count >= config.max_rows:
+                        self._ui_walk_done(count, limit_reached=True)
+                        return
+
+            self._ui_walk_done(count, limit_reached=False)
+
+        except Exception as exc:
+            self._ui_walk_error(str(exc))
+
+        finally:
+            self._toggle_walk_buttons_running(False)
+
+    def _ui_walk_result(self, result: dict[str, str], count: int):
+        def _update():
+            self.walk_tree.insert(
+                "",
+                "end",
+                values=(result["OID"], result["Type"], result["Value"]),
+            )
+            self.walk_progress_var.set(f"Collected {count} OID value(s).")
+        self.after(0, _update)
+
+    def _ui_walk_done(self, count: int, limit_reached: bool):
+        def _update():
+            if count == 0:
+                self.walk_status_var.set("Completed. No OIDs returned.")
+                self.walk_progress_var.set("Confirm the root OID, credentials, and device SNMP configuration.")
+            elif limit_reached:
+                self.walk_status_var.set("Completed at row limit.")
+                self.walk_progress_var.set(f"Collected {count} OID value(s). Export is available.")
+            else:
+                self.walk_status_var.set("Completed.")
+                self.walk_progress_var.set(f"Collected {count} OID value(s). Export is available.")
+        self.after(0, _update)
+
+    def _ui_walk_stopped(self, count: int):
+        def _update():
+            self.walk_status_var.set("Stopped by user.")
+            if count == 0:
+                self.walk_progress_var.set("No OID values were collected.")
+            else:
+                self.walk_progress_var.set(f"Collected {count} OID value(s). Export is available for partial results.")
+        self.after(0, _update)
+
+    def _ui_walk_error(self, msg: str):
+        def _update():
+            self.walk_status_var.set("SNMP walk error.")
+            self.walk_progress_var.set("")
+            messagebox.showerror("SNMP walk error", msg)
+        self.after(0, _update)
+
+    def export_walk_results(self):
+        if not self.walk_results:
+            messagebox.showinfo("No results", "Run an SNMP walk before exporting.")
+            return
+
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        safe_ip = self.walk_ip_var.get().strip().replace(".", "_") or "device"
+        path = filedialog.asksaveasfilename(
+            title="Export SNMP walk results",
+            defaultextension=".xlsx",
+            initialfile=f"SNMP_WALK_{safe_ip}_{timestamp}.xlsx",
+            filetypes=[
+                ("Excel workbook", "*.xlsx"),
+                ("CSV file", "*.csv"),
+            ],
+        )
+        if not path:
+            return
+
+        try:
+            df = pd.DataFrame(self.walk_results)
+            if path.lower().endswith(".csv"):
+                df.to_csv(path, index=False)
+            else:
+                df.to_excel(path, index=False)
+            self.walk_status_var.set("Export completed.")
+            self.walk_progress_var.set(f"Saved: {path}")
+            messagebox.showinfo("Export completed", f"SNMP walk results saved:\n{path}")
+        except Exception as exc:
+            messagebox.showerror("Export error", str(exc))
     
     def process_file(self, config: RunConfig):
         debug_lines = []

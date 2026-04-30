@@ -16,6 +16,7 @@ pyvenv.cfg
 app/build*/
 app/dist*/
 app/SNMP_Verifier_Release/
+release/SNMP_Verifier_Windows/
 *.spec.bak
 
 # Local logs and generated reports
