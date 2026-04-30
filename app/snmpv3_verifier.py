@@ -25,18 +25,13 @@ from pysnmp.hlapi import (
 )
 
 # -------------------------
-# PREDEFINED SNMP USERS
-# -------------------------
-USER1_NAME = "tmo-readonly"
-USER2_NAME = "tmo-readwrite"
-
-# -------------------------
 # Tunables
 # -------------------------
 PING_TIMEOUT_MS = 1000
 SNMP_TIMEOUT_SECONDS = 3
 SNMP_RETRIES = 1
 SNMP_PORT = 161
+MAX_SNMP_USERS = 6
 
 TEST_OIDS = [
     "1.3.6.1.2.1.1.1.0",  # sysDescr.0
@@ -70,16 +65,18 @@ BORDER = "#D6D6D6"
 
 
 @dataclass(frozen=True)
+class CredentialConfig:
+    username: str
+    auth_password: str
+    priv_password: str
+    auth_proto: str
+    priv_proto: str
+
+
+@dataclass(frozen=True)
 class RunConfig:
     file_path: str
-    user1_auth: str
-    user1_priv: str
-    user1_auth_proto: str
-    user1_priv_proto: str
-    user2_auth: str
-    user2_priv: str
-    user2_auth_proto: str
-    user2_priv_proto: str
+    credentials: tuple[CredentialConfig, ...]
     write_debug_log: bool
 
 def resource_path(relative_path):
@@ -220,17 +217,18 @@ class App(tk.Tk):
             pass
         self.file_path_var = tk.StringVar(value="")
 
-        # User 1 passwords + protocol selections (user name is fixed)
-        self.user1_auth_var = tk.StringVar(value="")
-        self.user1_priv_var = tk.StringVar(value="")
-        self.user1_auth_proto_var = tk.StringVar(value="SHA")
-        self.user1_priv_proto_var = tk.StringVar(value="AES-128")
-
-        # User 2 passwords + protocol selections (user name is fixed)
-        self.user2_auth_var = tk.StringVar(value="")
-        self.user2_priv_var = tk.StringVar(value="")
-        self.user2_auth_proto_var = tk.StringVar(value="SHA")
-        self.user2_priv_proto_var = tk.StringVar(value="AES-128")
+        self.user_count_var = tk.IntVar(value=1)
+        self.credential_vars = [
+            {
+                "username": tk.StringVar(value=""),
+                "auth": tk.StringVar(value=""),
+                "priv": tk.StringVar(value=""),
+                "auth_proto": tk.StringVar(value="SHA"),
+                "priv_proto": tk.StringVar(value="AES-128"),
+            }
+            for _ in range(MAX_SNMP_USERS)
+        ]
+        self.credential_sections: list[tk.Frame] = []
 
         # Debug option
         self.write_debug_log_var = tk.BooleanVar(value=True)
@@ -395,6 +393,7 @@ class App(tk.Tk):
         ).grid(row=2, column=1, sticky="w", pady=(3, 0))
 
         credentials_panel = make_panel(1)
+        credentials_panel.grid_columnconfigure(0, weight=1)
         tk.Label(
             credentials_panel,
             text="SNMPv3 credentials",
@@ -403,113 +402,72 @@ class App(tk.Tk):
             font=section_font,
         ).grid(row=0, column=0, sticky="w", pady=(0, 8))
 
-        credential_grid = tk.Frame(credentials_panel, bg=PANEL_BG)
-        credential_grid.grid(row=1, column=0, sticky="ew")
-        credential_grid.grid_columnconfigure(0, weight=1)
-        credential_grid.grid_columnconfigure(1, weight=1)
-
-        def add_credential_section(
-            column: int,
-            username: str,
-            auth_var: tk.StringVar,
-            priv_var: tk.StringVar,
-            auth_proto_var: tk.StringVar,
-            priv_proto_var: tk.StringVar,
-        ) -> None:
-            section = tk.Frame(
-                credential_grid,
-                bg=PANEL_ALT_BG,
-                highlightbackground=BORDER,
-                highlightcolor=BORDER,
-                highlightthickness=1,
-                bd=0,
-                padx=10,
-                pady=8,
-            )
-            section.grid(
-                row=0,
-                column=column,
-                sticky="nsew",
-                padx=(0, 8) if column == 0 else (8, 0),
-            )
-            section.grid_columnconfigure(1, weight=1)
-
-            tk.Label(
-                section,
-                text=username,
-                bg=PANEL_ALT_BG,
-                fg=TEXT_PRIMARY,
-                font=("Segoe UI", 10, "bold"),
-            ).grid(row=0, column=0, columnspan=2, sticky="w", pady=(0, 6))
-
-            tk.Label(
-                section,
-                text="AUTH protocol",
-                bg=PANEL_ALT_BG,
-                fg=TEXT_SECONDARY,
-                font=label_font,
-            ).grid(row=1, column=0, sticky="w", pady=(0, 5), padx=(0, 10))
-            ttk.Combobox(
-                section,
-                textvariable=auth_proto_var,
-                values=list(AUTH_PROTOCOLS.keys()),
-                state="readonly",
-                width=12,
-            ).grid(row=1, column=1, sticky="ew", pady=(0, 5))
-
-            tk.Label(
-                section,
-                text="PRIV protocol",
-                bg=PANEL_ALT_BG,
-                fg=TEXT_SECONDARY,
-                font=label_font,
-            ).grid(row=2, column=0, sticky="w", pady=(0, 5), padx=(0, 10))
-            ttk.Combobox(
-                section,
-                textvariable=priv_proto_var,
-                values=list(PRIV_PROTOCOLS.keys()),
-                state="readonly",
-                width=12,
-            ).grid(row=2, column=1, sticky="ew", pady=(0, 5))
-
-            tk.Label(
-                section,
-                text="AUTH password",
-                bg=PANEL_ALT_BG,
-                fg=TEXT_SECONDARY,
-                font=label_font,
-            ).grid(row=3, column=0, sticky="w", pady=(0, 5), padx=(0, 10))
-            ttk.Entry(section, textvariable=auth_var, show="*").grid(
-                row=3, column=1, sticky="ew", pady=(0, 5), ipady=1
-            )
-
-            tk.Label(
-                section,
-                text="PRIV password",
-                bg=PANEL_ALT_BG,
-                fg=TEXT_SECONDARY,
-                font=label_font,
-            ).grid(row=4, column=0, sticky="w", padx=(0, 10))
-            ttk.Entry(section, textvariable=priv_var, show="*").grid(
-                row=4, column=1, sticky="ew", ipady=1
-            )
-
-        add_credential_section(
-            0,
-            USER1_NAME,
-            self.user1_auth_var,
-            self.user1_priv_var,
-            self.user1_auth_proto_var,
-            self.user1_priv_proto_var,
+        user_count_frame = tk.Frame(credentials_panel, bg=PANEL_BG)
+        user_count_frame.grid(row=0, column=1, sticky="e", pady=(0, 8))
+        tk.Label(
+            user_count_frame,
+            text="Users to test",
+            bg=PANEL_BG,
+            fg=TEXT_SECONDARY,
+            font=label_font,
+        ).pack(side="left", padx=(0, 6))
+        user_count_combo = ttk.Combobox(
+            user_count_frame,
+            textvariable=self.user_count_var,
+            values=list(range(1, MAX_SNMP_USERS + 1)),
+            state="readonly",
+            width=4,
         )
-        add_credential_section(
-            1,
-            USER2_NAME,
-            self.user2_auth_var,
-            self.user2_priv_var,
-            self.user2_auth_proto_var,
-            self.user2_priv_proto_var,
+        user_count_combo.pack(side="left")
+        user_count_combo.bind("<<ComboboxSelected>>", self._on_user_count_changed)
+
+        credential_area = tk.Frame(credentials_panel, bg=PANEL_BG)
+        credential_area.grid(row=1, column=0, columnspan=2, sticky="ew")
+        credential_area.grid_columnconfigure(0, weight=1)
+
+        self.credentials_canvas = tk.Canvas(
+            credential_area,
+            bg=PANEL_BG,
+            height=160,
+            highlightthickness=0,
+            bd=0,
         )
+        credential_scrollbar = ttk.Scrollbar(
+            credential_area,
+            orient="vertical",
+            command=self.credentials_canvas.yview,
+        )
+        self.credentials_canvas.configure(yscrollcommand=credential_scrollbar.set)
+        self.credentials_canvas.grid(row=0, column=0, sticky="ew")
+        credential_scrollbar.grid(row=0, column=1, sticky="ns", padx=(6, 0))
+
+        self.credentials_inner = tk.Frame(self.credentials_canvas, bg=PANEL_BG)
+        self.credentials_window = self.credentials_canvas.create_window(
+            (0, 0),
+            window=self.credentials_inner,
+            anchor="nw",
+        )
+        self.credentials_inner.grid_columnconfigure(0, weight=1)
+        self.credentials_inner.grid_columnconfigure(1, weight=1)
+        self.credentials_inner.bind(
+            "<Configure>",
+            lambda _event: self.credentials_canvas.configure(
+                scrollregion=self.credentials_canvas.bbox("all")
+            ),
+        )
+        self.credentials_canvas.bind(
+            "<Configure>",
+            lambda event: self.credentials_canvas.itemconfigure(
+                self.credentials_window,
+                width=event.width,
+            ),
+        )
+
+        for idx, credential_vars in enumerate(self.credential_vars):
+            section = self._build_credential_section(self.credentials_inner, idx, credential_vars, label_font)
+            self.credential_sections.append(section)
+
+        self._refresh_credential_sections()
 
         controls_panel = make_panel(2, pady=(0, 0))
         controls_panel.grid_columnconfigure(0, weight=1)
@@ -572,6 +530,128 @@ class App(tk.Tk):
             anchor="w",
         ).grid(row=3, column=0, columnspan=2, sticky="ew")
 
+    def _build_credential_section(
+        self,
+        parent: tk.Widget,
+        index: int,
+        credential_vars: dict[str, tk.StringVar],
+        label_font: tuple[str, int],
+    ) -> tk.Frame:
+        section = tk.Frame(
+            parent,
+            bg=PANEL_ALT_BG,
+            highlightbackground=BORDER,
+            highlightcolor=BORDER,
+            highlightthickness=1,
+            bd=0,
+            padx=10,
+            pady=8,
+        )
+        section.grid_columnconfigure(1, weight=1)
+
+        tk.Label(
+            section,
+            text=f"SNMPv3 user {index + 1}",
+            bg=PANEL_ALT_BG,
+            fg=TEXT_PRIMARY,
+            font=("Segoe UI", 10, "bold"),
+        ).grid(row=0, column=0, columnspan=2, sticky="w", pady=(0, 6))
+
+        tk.Label(
+            section,
+            text="Username",
+            bg=PANEL_ALT_BG,
+            fg=TEXT_SECONDARY,
+            font=label_font,
+        ).grid(row=1, column=0, sticky="w", pady=(0, 5), padx=(0, 10))
+        ttk.Entry(section, textvariable=credential_vars["username"]).grid(
+            row=1, column=1, sticky="ew", pady=(0, 5), ipady=1
+        )
+
+        tk.Label(
+            section,
+            text="AUTH protocol",
+            bg=PANEL_ALT_BG,
+            fg=TEXT_SECONDARY,
+            font=label_font,
+        ).grid(row=2, column=0, sticky="w", pady=(0, 5), padx=(0, 10))
+        ttk.Combobox(
+            section,
+            textvariable=credential_vars["auth_proto"],
+            values=list(AUTH_PROTOCOLS.keys()),
+            state="readonly",
+            width=12,
+        ).grid(row=2, column=1, sticky="ew", pady=(0, 5))
+
+        tk.Label(
+            section,
+            text="PRIV protocol",
+            bg=PANEL_ALT_BG,
+            fg=TEXT_SECONDARY,
+            font=label_font,
+        ).grid(row=3, column=0, sticky="w", pady=(0, 5), padx=(0, 10))
+        ttk.Combobox(
+            section,
+            textvariable=credential_vars["priv_proto"],
+            values=list(PRIV_PROTOCOLS.keys()),
+            state="readonly",
+            width=12,
+        ).grid(row=3, column=1, sticky="ew", pady=(0, 5))
+
+        tk.Label(
+            section,
+            text="AUTH password",
+            bg=PANEL_ALT_BG,
+            fg=TEXT_SECONDARY,
+            font=label_font,
+        ).grid(row=4, column=0, sticky="w", pady=(0, 5), padx=(0, 10))
+        ttk.Entry(section, textvariable=credential_vars["auth"], show="*").grid(
+            row=4, column=1, sticky="ew", pady=(0, 5), ipady=1
+        )
+
+        tk.Label(
+            section,
+            text="PRIV password",
+            bg=PANEL_ALT_BG,
+            fg=TEXT_SECONDARY,
+            font=label_font,
+        ).grid(row=5, column=0, sticky="w", padx=(0, 10))
+        ttk.Entry(section, textvariable=credential_vars["priv"], show="*").grid(
+            row=5, column=1, sticky="ew", ipady=1
+        )
+
+        return section
+
+    def _get_user_count(self) -> int:
+        try:
+            return max(1, min(MAX_SNMP_USERS, int(self.user_count_var.get())))
+        except (TypeError, ValueError, tk.TclError):
+            self.user_count_var.set(1)
+            return 1
+
+    def _on_user_count_changed(self, _event=None):
+        self._refresh_credential_sections()
+
+    def _refresh_credential_sections(self):
+        visible_count = self._get_user_count()
+
+        for idx, section in enumerate(self.credential_sections):
+            section.grid_forget()
+            if idx < visible_count:
+                row = idx // 2
+                column = idx % 2
+                section.grid(
+                    row=row,
+                    column=column,
+                    sticky="nsew",
+                    padx=(0, 8) if column == 0 else (8, 0),
+                    pady=(0, 8),
+                )
+
+        if hasattr(self, "credentials_canvas"):
+            self.credentials_canvas.yview_moveto(0)
+            self.credentials_canvas.configure(scrollregion=self.credentials_canvas.bbox("all"))
+
     def browse_file(self):
         path = filedialog.askopenfilename(
             title="Select Excel workbook",
@@ -593,10 +673,7 @@ class App(tk.Tk):
 
     def run_in_thread(self):
         file_path = self.file_path_var.get().strip()
-        user1_auth = self.user1_auth_var.get().strip()
-        user1_priv = self.user1_priv_var.get().strip()
-        user2_auth = self.user2_auth_var.get().strip()
-        user2_priv = self.user2_priv_var.get().strip()
+        credential_configs: list[CredentialConfig] = []
 
         if not file_path:
             messagebox.showerror("Missing file", "Please select an Excel file.")
@@ -610,20 +687,42 @@ class App(tk.Tk):
             messagebox.showerror("Missing file", "The selected workbook could not be found.")
             return
 
-        if not (user1_auth and user1_priv and user2_auth and user2_priv):
-            messagebox.showerror("Missing inputs", "Please enter AUTH and PRIV passwords for both users.")
+        for idx in range(self._get_user_count()):
+            credential_vars = self.credential_vars[idx]
+            username = credential_vars["username"].get().strip()
+            auth_password = credential_vars["auth"].get().strip()
+            priv_password = credential_vars["priv"].get().strip()
+            auth_proto = credential_vars["auth_proto"].get().strip()
+            priv_proto = credential_vars["priv_proto"].get().strip()
+
+            if not username:
+                messagebox.showerror("Missing username", f"Please enter a username for SNMPv3 user {idx + 1}.")
+                return
+            if not auth_password or not priv_password:
+                messagebox.showerror(
+                    "Missing credentials",
+                    f"Please enter AUTH and PRIV passwords for SNMPv3 user {idx + 1}.",
+                )
+                return
+
+            credential_configs.append(
+                CredentialConfig(
+                    username=username,
+                    auth_password=auth_password,
+                    priv_password=priv_password,
+                    auth_proto=auth_proto,
+                    priv_proto=priv_proto,
+                )
+            )
+
+        normalized_usernames = [c.username.casefold() for c in credential_configs]
+        if len(set(normalized_usernames)) != len(normalized_usernames):
+            messagebox.showerror("Duplicate usernames", "Each SNMPv3 username must be unique.")
             return
 
         config = RunConfig(
             file_path=file_path,
-            user1_auth=user1_auth,
-            user1_priv=user1_priv,
-            user1_auth_proto=self.user1_auth_proto_var.get().strip(),
-            user1_priv_proto=self.user1_priv_proto_var.get().strip(),
-            user2_auth=user2_auth,
-            user2_priv=user2_priv,
-            user2_auth_proto=self.user2_auth_proto_var.get().strip(),
-            user2_priv_proto=self.user2_priv_proto_var.get().strip(),
+            credentials=tuple(credential_configs),
             write_debug_log=self.write_debug_log_var.get(),
         )
 
@@ -649,10 +748,12 @@ class App(tk.Tk):
 
             # Output columns
             reach_col = "Reachability"
-            snmp1_col = f"({USER1_NAME}) SNMP Status"
-            snmp2_col = f"({USER2_NAME}) SNMP Status"
+            snmp_cols = {
+                credential.username: f"({credential.username}) SNMP Status"
+                for credential in config.credentials
+            }
 
-            for c in [reach_col, snmp1_col, snmp2_col]:
+            for c in [reach_col, *snmp_cols.values()]:
                 if c not in df.columns:
                     df[c] = ""
 
@@ -660,7 +761,7 @@ class App(tk.Tk):
 
             def save_partial_report():
                 out_path = self._output_path(in_path, partial=True)
-                self._save_report(df, debug_lines, out_path, config.write_debug_log)
+                self._save_report(df, debug_lines, out_path, config.write_debug_log, config.credentials)
                 self._ui_stopped(out_path, config.write_debug_log)
 
             for idx in range(total):
@@ -675,10 +776,13 @@ class App(tk.Tk):
 
                 if not is_probably_ip(ip):
                     df.at[idx, reach_col] = "not Reachable"
-                    df.at[idx, snmp1_col] = "SNMP Communication Not Successful"
-                    df.at[idx, snmp2_col] = "SNMP Communication Not Successful"
+                    for snmp_col in snmp_cols.values():
+                        df.at[idx, snmp_col] = "SNMP Communication Not Successful"
                     if config.write_debug_log:
-                        debug_lines.append(f"{ip}\tINVALID_IP")
+                        debug_lines.append(
+                            f"{ip}\tPING=INVALID\t"
+                            + "\t".join("NOT_TESTED:Invalid IP" for _credential in config.credentials)
+                        )
                     continue
 
                 reachable = ping_ip(ip)
@@ -688,46 +792,39 @@ class App(tk.Tk):
                     save_partial_report()
                     return
 
-                snmp1_ok, snmp1_detail = snmp_test_v3_credentials(
-                    USER1_NAME,
-                    config.user1_auth,
-                    config.user1_priv,
-                    ip,
-                    auth_proto_name=config.user1_auth_proto,
-                    priv_proto_name=config.user1_priv_proto,
-                    stop_requested=self.stop_requested,
-                )
+                debug_parts = [f"{ip}\tPING={'OK' if reachable else 'FAIL'}"]
 
-                if self.stop_requested.is_set():
-                    df.at[idx, snmp1_col] = "SNMP Success" if snmp1_ok else "SNMP Communication Not Successful"
-                    df.at[idx, snmp2_col] = "SNMP Communication Not Successful"
-                    save_partial_report()
-                    return
-
-                snmp2_ok, snmp2_detail = snmp_test_v3_credentials(
-                    USER2_NAME,
-                    config.user2_auth,
-                    config.user2_priv,
-                    ip,
-                    auth_proto_name=config.user2_auth_proto,
-                    priv_proto_name=config.user2_priv_proto,
-                    stop_requested=self.stop_requested,
-                )
-
-                df.at[idx, snmp1_col] = "SNMP Success" if snmp1_ok else "SNMP Communication Not Successful"
-                df.at[idx, snmp2_col] = "SNMP Success" if snmp2_ok else "SNMP Communication Not Successful"
-
-                if config.write_debug_log:
-                    debug_lines.append(
-                        f"{ip}\tPING={'OK' if reachable else 'FAIL'}\t"
-                        f"{USER1_NAME}({config.user1_auth_proto}/{config.user1_priv_proto})="
-                        f"{'OK' if snmp1_ok else 'FAIL'}:{snmp1_detail}\t"
-                        f"{USER2_NAME}({config.user2_auth_proto}/{config.user2_priv_proto})="
-                        f"{'OK' if snmp2_ok else 'FAIL'}:{snmp2_detail}"
+                for credential in config.credentials:
+                    snmp_ok, snmp_detail = snmp_test_v3_credentials(
+                        credential.username,
+                        credential.auth_password,
+                        credential.priv_password,
+                        ip,
+                        auth_proto_name=credential.auth_proto,
+                        priv_proto_name=credential.priv_proto,
+                        stop_requested=self.stop_requested,
+                    )
+                    df.at[idx, snmp_cols[credential.username]] = (
+                        "SNMP Success" if snmp_ok else "SNMP Communication Not Successful"
                     )
 
+                    if config.write_debug_log:
+                        debug_parts.append(
+                            f"{credential.username}({credential.auth_proto}/{credential.priv_proto})="
+                            f"{'OK' if snmp_ok else 'FAIL'}:{snmp_detail}"
+                        )
+
+                    if self.stop_requested.is_set():
+                        if config.write_debug_log:
+                            debug_lines.append("\t".join(debug_parts))
+                        save_partial_report()
+                        return
+
+                if config.write_debug_log:
+                    debug_lines.append("\t".join(debug_parts))
+
             out_path = self._output_path(in_path, partial=False)
-            self._save_report(df, debug_lines, out_path, config.write_debug_log)
+            self._save_report(df, debug_lines, out_path, config.write_debug_log, config.credentials)
             self._ui_done(out_path, config.write_debug_log)
 
         except Exception as e:
@@ -736,13 +833,21 @@ class App(tk.Tk):
         finally:
             self._toggle_buttons_running(False)
 
-    def _save_report(self, df: pd.DataFrame, debug_lines: list[str], out_path: str, write_debug_log: bool):
+    def _save_report(
+        self,
+        df: pd.DataFrame,
+        debug_lines: list[str],
+        out_path: str,
+        write_debug_log: bool,
+        credentials: tuple[CredentialConfig, ...],
+    ):
         df.to_excel(out_path, index=False)
 
         if write_debug_log:
             log_path = self._debug_log_path(out_path)
             with open(log_path, "w", encoding="utf-8") as f:
-                f.write("IP\tPING\ttmo-readonly_RESULT\ttmo-readwrite_RESULT\n")
+                user_headers = "\t".join(f"{credential.username}_RESULT" for credential in credentials)
+                f.write(f"IP\tPING\t{user_headers}\n")
                 for line in debug_lines:
                     f.write(line + "\n")
 

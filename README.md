@@ -4,7 +4,7 @@
 
 The SNMP Verification Tool is a Windows desktop application for validating device reachability and SNMPv3 credential access against a list of device IP addresses.
 
-The application reads an Excel workbook, checks each device for network reachability, attempts SNMPv3 validation using the predefined users `tmo-readonly` and `tmo-readwrite`, and writes a timestamped Excel results file.
+The application reads an Excel workbook, checks each device for network reachability, attempts SNMPv3 validation using one to six user-supplied SNMPv3 accounts, and writes a timestamped Excel results file.
 
 ## Current Release Package
 
@@ -20,10 +20,11 @@ To distribute the application to company users, provide the ZIP file. Users must
 2. Open the extracted folder.
 3. Run `SNMP_Verifier.exe`.
 4. Select an `.xlsx` workbook that contains a column named `IP Address`.
-5. Enter the AUTH and PRIV passwords for both predefined SNMPv3 users.
-6. Select the required AUTH and PRIV protocols.
-7. Leave `Write SNMP debug log` enabled unless directed otherwise.
-8. Click `Initiate Verification`.
+5. Select the number of SNMPv3 users to test. The maximum is six users.
+6. Enter the username, AUTH password, and PRIV password for each SNMPv3 user.
+7. Select the required AUTH and PRIV protocols for each user.
+8. Leave `Write SNMP debug log` enabled unless directed otherwise.
+9. Click `Initiate Verification`.
 
 The application creates a new Excel report in the same folder as the input workbook.
 
@@ -54,12 +55,12 @@ When debug logging is enabled, the application also creates:
 The generated Excel report includes:
 
 - `Reachability`
-- `(tmo-readonly) SNMP Status`
-- `(tmo-readwrite) SNMP Status`
+- `(<SNMPv3 username>) SNMP Status` for each user entered in the application.
 
 ## Security Notes
 
 - The application does not save SNMP passwords.
+- Username and password values are entered at runtime by the user.
 - Password fields are masked in the user interface.
 - Passwords are not written to the Excel report or debug log.
 - The debug log records IP-level test results and SNMP response details for troubleshooting.
