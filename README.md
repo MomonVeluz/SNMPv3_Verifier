@@ -13,7 +13,7 @@ The prepared Windows package is available at:
 
 `release/SNMP_Verifier_Windows.zip`
 
-To distribute the application to company users, provide the ZIP file. Users must extract the full ZIP contents before running the application.
+To distribute the application to users, provide the ZIP file. Users must extract the full ZIP contents before running the application.
 
 ## For End Users
 
